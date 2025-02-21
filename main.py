@@ -1,93 +1,111 @@
 import streamlit as st
 from pytube import YouTube
-import validators
+from io import BytesIO
+import re
+from typing import Union
 
-def is_valid_url(url):
-    return validators.url(url)
+# Configure page settings
+st.set_page_config(
+    page_title="YouTube Downloader",
+    page_icon="🎬",
+    layout="centered"
+)
 
-def download_audio(stream, output_path="audio"):
-    if not os.path.exists(output_path):
-        os.makedirs(output_path)
-    return stream.download(output_path)
+def validate_youtube_url(url: str) -> bool:
+    """Validate YouTube and YouTube Music URLs"""
+    pattern = (
+        r'(https?://)?(www\.)?'
+        '(youtube|music\.youtube)\.com/'
+        '(watch\?v=|shorts/|embed/|v/|.+\?v=)?([^&=%\?]{11})'
+    )
+    return re.match(pattern, url) is not None
 
-def download_video(stream, output_path="video"):
-    if not os.path.exists(output_path):
-        os.makedirs(output_path)
-    return stream.download(output_path)
-
-def main():
-    st.title("YouTube Video Downloader")
-    
-    url = st.text_area("Paste your YouTube URL here", placeholder="https://www.youtube.com/watch?v=...")
-    
-    if not url:
-        st.warning("Please paste a YouTube URL")
-        return
-    
-    show_more_options = st.checkbox("Show more download options")
-
+def get_streams(url: str, media_type: str) -> Union[list, None]:
+    """Retrieve available streams for the video"""
     try:
         yt = YouTube(url)
-        
-        st.header("Video Information")
-        st.write(f"Title: {yt.title}")
-        st.write(f"Author: {yt.author}")
-        st.write(f"Length: {yt.length} seconds")
-        st.write(f"Description: {yt.description[:200]}...")
-
-        if show_more_options:
-            resolutions = [str(stream.resolution) for stream in yt.streams if stream.resolution is not None]
-            audio_only = st.checkbox("Download only audio (raw format)")
-        else:
-            audio_only = st.checkbox("Download only audio (raw format)", value=False)
-
-        if audio_only:
-            audio_stream = yt.streams.filter(only_audio=True)
-            if len(audio_stream) == 0:
-                st.error("No audio-only stream available")
-                return
-            audio_stream = audio_stream.first()
-            
-            st.subheader("Audio Download")
-            st.write("This will download the audio in its original format (e.g., mp4)")
-            
-            if st.button("Download Audio"):
-                output_path = os.path.join(os.getcwd(), "audio")
-                audio_file = download_audio(audio_stream, output_path)
-                
-                st.success("Download complete!")
-                with open(audio_file, "rb") as file:
-                    st.download_button(label="Download Audio",
-                                      data=file,
-                                      file_name=os.path.basename(audio_file))
-        else:
-            if show_more_options:
-                st.subheader("Video Download")
-                with st.expander("Advanced options"):
-                    st.write("This will download the video in the highest available quality")
-                
-                if st.button("Download Video"):
-                    output_path = os.path.join(os.getcwd(), "video")
-                    video_file = download_video(yt.streams.get_highest_resolution().first(), output_path)
-                    st.success("Download complete!")
-                    with open(video_file, "rb") as file:
-                        st.download_button(label="Download Video",
-                                          data=file,
-                                          file_name=os.path.basename(video_file))
-            else:
-                st.subheader("Video Download")
-                if st.button("Download Video"):
-                    output_path = os.path.join(os.getcwd(), "video")
-                    video_file = download_video(yt.streams.get_highest_resolution().first(), output_path)
-                    st.success("Download complete!")
-                    with open(video_file, "rb") as file:
-                        st.download_button(label="Download Video",
-                                          data=file,
-                                          file_name=os.path.basename(video_file))
-
+        if media_type == "video":
+            return yt.streams.filter(
+                progressive=True,
+                file_extension='mp4',
+                type='video'
+            ).order_by('resolution').desc()
+        return yt.streams.filter(
+            only_audio=True
+        ).order_by('abr').desc()
     except Exception as e:
-        st.error("An error occurred during processing.")
-        st.write(str(e))
+        st.error(f"Error retrieving streams: {str(e)}")
+        return None
 
-if __name__ == "__main__":
-    main()
+def download_stream(stream) -> BytesIO:
+    """Download stream to in-memory buffer"""
+    buffer = BytesIO()
+    stream.stream_to_buffer(buffer)
+    buffer.seek(0)
+    return buffer
+
+# UI Components
+st.title("🎥 YouTube Media Downloader")
+st.markdown("""
+    Download videos or audio from YouTube and YouTube Music  
+    *Supports resolutions up to 720p without FFmpeg*
+""")
+
+url = st.text_input("Enter YouTube URL:", placeholder="https://youtube.com/watch?v=...")
+
+if url:
+    if not validate_youtube_url(url):
+        st.error("Invalid YouTube URL. Please use either youtube.com or music.youtube.com links.")
+        st.stop()
+    
+    media_type = st.radio(
+        "Select download type:",
+        ("Video", "Audio"),
+        horizontal=True,
+        index=0
+    )
+    
+    streams = get_streams(url, media_type.lower())
+    if not streams:
+        st.error("No available streams found for this content")
+        st.stop()
+    
+    if media_type == "Video":
+        selected = st.selectbox(
+            "Select resolution:",
+            streams,
+            format_func=lambda s: f"{s.resolution} ({s.fps}fps)"
+        )
+    else:
+        selected = st.selectbox(
+            "Select audio quality:",
+            streams,
+            format_func=lambda s: f"{s.abr} ({(s.filesize_mb):.1f} MB)"
+        )
+    
+    if st.button("Prepare Download"):
+        with st.spinner(f"Processing {media_type}..."):
+            try:
+                buffer = download_stream(selected)
+                mime_type = "video/mp4" if media_type == "Video" else "audio/webm"
+                
+                st.success("Ready for download!")
+                st.download_button(
+                    label=f"Download {media_type}",
+                    data=buffer,
+                    file_name=selected.default_filename,
+                    mime=mime_type,
+                    help="File will be saved in your browser's default download location"
+                )
+            except Exception as e:
+                st.error(f"Download failed: {str(e)}")
+
+# Add footer with usage tips
+st.markdown("---")
+st.markdown("""
+    **Usage Tips:**
+    - For HD videos: Choose 720p resolution (if available)
+    - For audio-only: Select highest ABR value for best quality
+    - Shorts/embedded videos are supported
+    - Downloads may take longer for larger files
+""")
